@@ -1,0 +1,19 @@
+# Generated output
+stock_output/
+
+# Ruff cache
+.ruff_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Claude Code personal settings
+.claude/settings.local.json
+CLAUDE.local.md
