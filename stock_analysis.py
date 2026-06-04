@@ -234,8 +234,7 @@ def save_csv(symbol: str, df: pd.DataFrame, fundamentals: dict, out_dir: str) ->
 # ── Charts ────────────────────────────────────────────────────────────────────
 
 
-def plot_analysis(symbol: str, df: pd.DataFrame, out_dir: str) -> None:
-    os.makedirs(out_dir, exist_ok=True)
+def make_figure(symbol: str, df: pd.DataFrame) -> plt.Figure:
     fig = plt.figure(figsize=(14, 12), facecolor="#0d1117")
     fig.suptitle(f"{symbol} — Technical Analysis", color="white", fontsize=15, y=0.98)
 
@@ -337,9 +336,15 @@ def plot_analysis(symbol: str, df: pd.DataFrame, out_dir: str) -> None:
     )
     ax_macd.tick_params(axis="x", colors="gray", labelsize=7)
 
+    return fig
+
+
+def plot_analysis(symbol: str, df: pd.DataFrame, out_dir: str) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    fig = make_figure(symbol, df)
     chart_path = os.path.join(out_dir, f"{symbol}_chart.png")
-    plt.savefig(chart_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
-    plt.close()
+    fig.savefig(chart_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
+    plt.close(fig)
     print(f"  ✔  Chart saved      → {chart_path}")
 
 
