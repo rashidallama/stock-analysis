@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 
 from stock_analysis import (
     SMA_LONG,
@@ -23,26 +24,46 @@ with st.sidebar:
 
 col_input, col_btn = st.columns([4, 1])
 with col_input:
-    tickers_input = st.text_input("Tickers (comma-separated)", "AAPL", label_visibility="collapsed")
+    tickers_input = st.text_input(
+        "Tickers (comma-separated)", "AAPL", label_visibility="collapsed"
+    )
 with col_btn:
     analyze = st.button("Analyze", type="primary", use_container_width=True)
 
 if not analyze:
     st.stop()
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch(symbol: str, period: str, interval: str):
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(period=period, interval=interval)
+    if df.empty:
+        return None, None
+    df = compute_technicals(df)
+    try:
+        fundamentals = get_fundamentals(ticker)
+    except YFRateLimitError:
+        fundamentals = None
+    return df, fundamentals
+
+
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 for symbol in tickers:
     with st.spinner(f"Fetching {symbol}…"):
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
+        try:
+            df, fundamentals = fetch(symbol, period, interval)
+        except YFRateLimitError:
+            st.error(
+                f"**{symbol}:** Yahoo Finance is rate-limiting this IP. "
+                "Wait 30–60 seconds and try again."
+            )
+            continue
 
-    if df.empty:
+    if df is None:
         st.error(f"No data returned for '{symbol}'. Check the ticker symbol.")
         continue
-
-    df = compute_technicals(df)
-    fundamentals = get_fundamentals(ticker)
 
     last = df.iloc[-1]
     prev_close = df.iloc[-2]["Close"]
@@ -69,7 +90,12 @@ for symbol in tickers:
         st.dataframe(
             pd.DataFrame(
                 {
-                    "Indicator": ["RSI (14)", "MACD", f"SMA {SMA_SHORT}/{SMA_LONG}", "Bollinger Bands"],
+                    "Indicator": [
+                        "RSI (14)",
+                        "MACD",
+                        f"SMA {SMA_SHORT}/{SMA_LONG}",
+                        "Bollinger Bands",
+                    ],
                     "Value": [
                         f"{rsi:.1f}",
                         f"{last['MACD']:.3f}",
@@ -79,7 +105,9 @@ for symbol in tickers:
                     "Signal": [
                         rsi_signal(rsi),
                         macd_signal(last["MACD"], last["MACD_Signal"]),
-                        sma_signal(price, last[f"SMA_{SMA_SHORT}"], last[f"SMA_{SMA_LONG}"]),
+                        sma_signal(
+                            price, last[f"SMA_{SMA_SHORT}"], last[f"SMA_{SMA_LONG}"]
+                        ),
                         "",
                     ],
                 }
@@ -89,12 +117,17 @@ for symbol in tickers:
         )
 
     with col_fund:
-        st.write("**Fundamentals**")
-        st.dataframe(
-            pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"]),
-            hide_index=True,
-            use_container_width=True,
-        )
+        if fundamentals:
+            st.write("**Fundamentals**")
+            st.dataframe(
+                pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.warning(
+                "Fundamentals unavailable (rate limited). Try again in a moment."
+            )
 
     dl1, dl2 = st.columns(2)
     dl1.download_button(
@@ -103,11 +136,14 @@ for symbol in tickers:
         f"{symbol}_technicals.csv",
         "text/csv",
     )
-    dl2.download_button(
-        f"Download {symbol} Fundamentals CSV",
-        pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"]).to_csv(index=False).encode(),
-        f"{symbol}_fundamentals.csv",
-        "text/csv",
-    )
+    if fundamentals:
+        dl2.download_button(
+            f"Download {symbol} Fundamentals CSV",
+            pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"])
+            .to_csv(index=False)
+            .encode(),
+            f"{symbol}_fundamentals.csv",
+            "text/csv",
+        )
 
     st.divider()
