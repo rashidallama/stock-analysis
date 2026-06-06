@@ -1,3 +1,4 @@
+import anthropic
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -13,6 +14,63 @@ from stock_analysis import (
     rsi_signal,
     sma_signal,
 )
+
+_ANALYST_PROMPT = """You are an expert equity analyst with 20 years of experience across Wall Street and buy-side firms. Given a stock's technical indicators and fundamentals, produce a sharp, data-driven investment brief.
+
+Respond in this exact format — no preamble, no disclaimers:
+
+## Verdict: BUY / HOLD / SELL
+
+### Why Invest (or Not)
+2–3 sentences grounded in the numbers provided.
+
+### Entry Price
+Specific price point or range with a one-line rationale.
+
+### MOAT
+Competitive advantage (or lack of one) in 1–2 sentences.
+
+### Key Risks
+- Risk 1
+- Risk 2
+- Risk 3"""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_commentary(
+    symbol: str,
+    price: float,
+    pct: float,
+    tech_str: str,
+    fund_str: str,
+) -> str:
+    client = anthropic.Anthropic()
+    with client.messages.stream(
+        model="claude-opus-4-8",
+        max_tokens=1024,
+        thinking={"type": "adaptive"},
+        system=[
+            {
+                "type": "text",
+                "text": _ANALYST_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Analyze **{symbol}**\n\n"
+                    f"Current price: ${price:.2f} ({pct:+.2f}% today)\n\n"
+                    f"**Technical Indicators**\n{tech_str}\n\n"
+                    f"**Fundamentals**\n{fund_str}"
+                ),
+            }
+        ],
+    ) as stream:
+        message = stream.get_final_message()
+    return next(b.text for b in message.content if b.type == "text")
+
 
 st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
 st.title("📈 Stock Analysis")
@@ -79,6 +137,37 @@ for symbol in tickers:
     m3.metric(f"SMA {SMA_SHORT}", f"${last[f'SMA_{SMA_SHORT}']:.2f}")
     m4.metric(f"SMA {SMA_LONG}", f"${last[f'SMA_{SMA_LONG}']:.2f}")
 
+    # ── AI Investment Commentary ──────────────────────────────────────────────
+    rsi_val = last["RSI"]
+    tech_str = (
+        f"RSI (14): {rsi_val:.1f} — {rsi_signal(rsi_val)}\n"
+        f"MACD: {last['MACD']:.3f} — {macd_signal(last['MACD'], last['MACD_Signal'])}\n"
+        f"SMA {SMA_SHORT}/{SMA_LONG}: {last[f'SMA_{SMA_SHORT}']:.2f} / {last[f'SMA_{SMA_LONG}']:.2f} — "
+        f"{sma_signal(price, last[f'SMA_{SMA_SHORT}'], last[f'SMA_{SMA_LONG}'])}\n"
+        f"Bollinger Bands: {last['BB_Lower']:.2f} – {last['BB_Upper']:.2f} (mid {last['BB_Mid']:.2f})"
+    )
+    fund_str = (
+        "\n".join(f"{k}: {v}" for k, v in fundamentals.items())
+        if fundamentals
+        else "Fundamentals unavailable."
+    )
+
+    with st.container(border=True):
+        st.markdown("#### 🤖 AI Investment Analysis")
+        try:
+            with st.spinner("Generating analysis…"):
+                commentary = generate_commentary(symbol, price, pct, tech_str, fund_str)
+            st.markdown(commentary)
+        except anthropic.AuthenticationError:
+            st.warning(
+                "Add your `ANTHROPIC_API_KEY` to Streamlit secrets to enable AI commentary."
+            )
+        except anthropic.RateLimitError:
+            st.warning("Claude API rate limit hit — try again in a moment.")
+        except Exception as e:
+            st.warning(f"AI commentary unavailable: {e}")
+
+    # ── Chart ─────────────────────────────────────────────────────────────────
     fig = make_plotly_figure(symbol, df)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -86,7 +175,6 @@ for symbol in tickers:
 
     with col_tech:
         st.write("**Technical Signals**")
-        rsi = last["RSI"]
         st.dataframe(
             pd.DataFrame(
                 {
@@ -97,13 +185,13 @@ for symbol in tickers:
                         "Bollinger Bands",
                     ],
                     "Value": [
-                        f"{rsi:.1f}",
+                        f"{rsi_val:.1f}",
                         f"{last['MACD']:.3f}",
                         f"{last[f'SMA_{SMA_SHORT}']:.2f} / {last[f'SMA_{SMA_LONG}']:.2f}",
                         f"{last['BB_Lower']:.2f} – {last['BB_Upper']:.2f}",
                     ],
                     "Signal": [
-                        rsi_signal(rsi),
+                        rsi_signal(rsi_val),
                         macd_signal(last["MACD"], last["MACD_Signal"]),
                         sma_signal(
                             price, last[f"SMA_{SMA_SHORT}"], last[f"SMA_{SMA_LONG}"]
