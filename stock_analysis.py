@@ -23,6 +23,8 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from tabulate import tabulate
 import yfinance as yf
 
@@ -346,6 +348,191 @@ def plot_analysis(symbol: str, df: pd.DataFrame, out_dir: str) -> None:
     fig.savefig(chart_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
     plt.close(fig)
     print(f"  ✔  Chart saved      → {chart_path}")
+
+
+# ── Interactive Plotly chart ──────────────────────────────────────────────────
+
+
+def make_plotly_figure(symbol: str, df: pd.DataFrame) -> go.Figure:
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.5, 0.15, 0.15, 0.2],
+    )
+
+    idx = df.index
+
+    # ── Row 1: Candlestick + Bollinger Bands + Moving Averages ───────────────
+    fig.add_trace(
+        go.Scatter(
+            x=list(idx) + list(reversed(list(idx))),
+            y=list(df["BB_Upper"]) + list(reversed(list(df["BB_Lower"]))),
+            fill="toself",
+            fillcolor="rgba(88,166,255,0.08)",
+            line=dict(width=0),
+            name="Bollinger Band",
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df["BB_Upper"],
+            line=dict(color="#58a6ff", width=1, dash="dash"),
+            name="BB Upper",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df["BB_Lower"],
+            line=dict(color="#58a6ff", width=1, dash="dash"),
+            name="BB Lower",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=idx,
+            open=df["Open"],
+            high=df["High"],
+            low=df["Low"],
+            close=df["Close"],
+            name="Price",
+            increasing=dict(line=dict(color="#3fb950"), fillcolor="#3fb950"),
+            decreasing=dict(line=dict(color="#f85149"), fillcolor="#f85149"),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df[f"SMA_{SMA_SHORT}"],
+            line=dict(color="#f0883e", width=1.5),
+            name=f"SMA {SMA_SHORT}",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df[f"SMA_{SMA_LONG}"],
+            line=dict(color="#3fb950", width=1.5),
+            name=f"SMA {SMA_LONG}",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df[f"EMA_{EMA_PERIOD}"],
+            line=dict(color="#d2a8ff", width=1, dash="dot"),
+            name=f"EMA {EMA_PERIOD}",
+        ),
+        row=1,
+        col=1,
+    )
+
+    # ── Row 2: Volume ─────────────────────────────────────────────────────────
+    vol_colors = [
+        "#3fb950" if c >= o else "#f85149" for c, o in zip(df["Close"], df["Open"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=idx,
+            y=df["Volume"],
+            marker_color=vol_colors,
+            name="Volume",
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+
+    # ── Row 3: RSI ────────────────────────────────────────────────────────────
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df["RSI"],
+            line=dict(color="#f0883e", width=1.5),
+            name="RSI",
+            showlegend=False,
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_hrect(
+        y0=70, y1=100, fillcolor="#f85149", opacity=0.08, line_width=0, row=3, col=1
+    )
+    fig.add_hrect(
+        y0=0, y1=30, fillcolor="#3fb950", opacity=0.08, line_width=0, row=3, col=1
+    )
+    fig.add_hline(y=70, line=dict(color="#f85149", width=1, dash="dash"), row=3, col=1)
+    fig.add_hline(y=30, line=dict(color="#3fb950", width=1, dash="dash"), row=3, col=1)
+
+    # ── Row 4: MACD ───────────────────────────────────────────────────────────
+    hist_colors = ["#3fb950" if v >= 0 else "#f85149" for v in df["MACD_Hist"]]
+    fig.add_trace(
+        go.Bar(
+            x=idx,
+            y=df["MACD_Hist"],
+            marker_color=hist_colors,
+            name="MACD Hist",
+            showlegend=False,
+        ),
+        row=4,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx, y=df["MACD"], line=dict(color="#58a6ff", width=1.5), name="MACD"
+        ),
+        row=4,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=idx,
+            y=df["MACD_Signal"],
+            line=dict(color="#f0883e", width=1.2),
+            name="Signal",
+        ),
+        row=4,
+        col=1,
+    )
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    axis_style = dict(gridcolor="#30363d", showgrid=True, zeroline=False)
+    fig.update_xaxes(**axis_style, rangeslider_visible=False)
+    fig.update_yaxes(**axis_style)
+    fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
+    fig.update_layout(
+        height=800,
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#0d1117",
+        font=dict(color="#e6edf3"),
+        hovermode="x unified",
+        legend=dict(
+            bgcolor="#161b22", bordercolor="#30363d", borderwidth=1, font=dict(size=11)
+        ),
+        margin=dict(l=60, r=20, t=30, b=20),
+    )
+
+    return fig
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

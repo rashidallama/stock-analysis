@@ -9,7 +9,7 @@ from stock_analysis import (
     compute_technicals,
     get_fundamentals,
     macd_signal,
-    make_figure,
+    make_plotly_figure,
     rsi_signal,
     sma_signal,
 )
@@ -79,8 +79,8 @@ for symbol in tickers:
     m3.metric(f"SMA {SMA_SHORT}", f"${last[f'SMA_{SMA_SHORT}']:.2f}")
     m4.metric(f"SMA {SMA_LONG}", f"${last[f'SMA_{SMA_LONG}']:.2f}")
 
-    fig = make_figure(symbol, df)
-    st.pyplot(fig, use_container_width=True)
+    fig = make_plotly_figure(symbol, df)
+    st.plotly_chart(fig, use_container_width=True)
 
     col_tech, col_fund = st.columns(2)
 

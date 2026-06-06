@@ -1,5 +1,6 @@
 yfinance
 pandas
 matplotlib
+plotly
 tabulate
 streamlit
