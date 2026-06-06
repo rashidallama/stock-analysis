@@ -95,13 +95,16 @@ if not analyze:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch(symbol: str, period: str, interval: str):
     ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval)
+    try:
+        df = ticker.history(period=period, interval=interval)
+    except Exception:
+        return None, None
     if df.empty:
         return None, None
     df = compute_technicals(df)
     try:
         fundamentals = get_fundamentals(ticker)
-    except YFRateLimitError:
+    except Exception:
         fundamentals = None
     return df, fundamentals
 
@@ -110,17 +113,13 @@ tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 for symbol in tickers:
     with st.spinner(f"Fetching {symbol}…"):
-        try:
-            df, fundamentals = fetch(symbol, period, interval)
-        except YFRateLimitError:
-            st.error(
-                f"**{symbol}:** Yahoo Finance is rate-limiting this IP. "
-                "Wait 30–60 seconds and try again."
-            )
-            continue
+        df, fundamentals = fetch(symbol, period, interval)
 
     if df is None:
-        st.error(f"No data returned for '{symbol}'. Check the ticker symbol.")
+        st.error(
+            f"**{symbol}:** Could not fetch data. Yahoo Finance may be rate-limiting — "
+            "wait 30–60 seconds and try again, or check the ticker symbol."
+        )
         continue
 
     last = df.iloc[-1]
