@@ -1,8 +1,8 @@
-import anthropic
+from __future__ import annotations
+
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-from yfinance.exceptions import YFRateLimitError
 
 from stock_analysis import (
     SMA_LONG,
@@ -15,61 +15,255 @@ from stock_analysis import (
     sma_signal,
 )
 
-_ANALYST_PROMPT = """You are an expert equity analyst with 20 years of experience across Wall Street and buy-side firms. Given a stock's technical indicators and fundamentals, produce a sharp, data-driven investment brief.
 
-Respond in this exact format — no preamble, no disclaimers:
-
-## Verdict: BUY / HOLD / SELL
-
-### Why Invest (or Not)
-2–3 sentences grounded in the numbers provided.
-
-### Entry Price
-Specific price point or range with a one-line rationale.
-
-### MOAT
-Competitive advantage (or lack of one) in 1–2 sentences.
-
-### Key Risks
-- Risk 1
-- Risk 2
-- Risk 3"""
+def _parse_num(val: str) -> float | None:
+    """Parse formatted values like '$234.56', '3.5%', '1.23B' → float."""
+    if not val or val == "N/A":
+        return None
+    try:
+        v = str(val).replace("$", "").replace("%", "").replace(",", "").strip()
+        if v.endswith("B"):
+            return float(v[:-1]) * 1e9
+        if v.endswith("M"):
+            return float(v[:-1]) * 1e6
+        return float(v)
+    except (ValueError, AttributeError):
+        return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def generate_commentary(
+def build_commentary(
     symbol: str,
     price: float,
     pct: float,
-    tech_str: str,
-    fund_str: str,
+    last,
+    fundamentals: dict | None,
 ) -> str:
-    client = anthropic.Anthropic()
-    with client.messages.stream(
-        model="claude-opus-4-8",
-        max_tokens=1024,
-        thinking={"type": "adaptive"},
-        system=[
-            {
-                "type": "text",
-                "text": _ANALYST_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Analyze **{symbol}**\n\n"
-                    f"Current price: ${price:.2f} ({pct:+.2f}% today)\n\n"
-                    f"**Technical Indicators**\n{tech_str}\n\n"
-                    f"**Fundamentals**\n{fund_str}"
-                ),
-            }
-        ],
-    ) as stream:
-        message = stream.get_final_message()
-    return next(b.text for b in message.content if b.type == "text")
+    score = 0
+    bull: list[str] = []
+    bear: list[str] = []
+
+    rsi = last["RSI"]
+    macd = last["MACD"]
+    macd_sig = last["MACD_Signal"]
+    sma_s = last[f"SMA_{SMA_SHORT}"]
+    sma_l = last[f"SMA_{SMA_LONG}"]
+    bb_upper = last["BB_Upper"]
+    bb_lower = last["BB_Lower"]
+
+    # ── RSI ───────────────────────────────────────────────────────────────────
+    if rsi < 30:
+        score += 2
+        bull.append(
+            f"RSI at {rsi:.1f} — deeply oversold, historically a mean-reversion entry"
+        )
+    elif rsi < 45:
+        score += 1
+        bull.append(f"RSI at {rsi:.1f} — momentum cooling, room to recover")
+    elif rsi > 70:
+        score -= 2
+        bear.append(f"RSI at {rsi:.1f} — overbought, near-term pullback likely")
+    elif rsi > 60:
+        score -= 1
+        bear.append(f"RSI at {rsi:.1f} — elevated, watch for reversal")
+
+    # ── MACD ──────────────────────────────────────────────────────────────────
+    if macd > macd_sig:
+        score += 1
+        bull.append("MACD above signal line — bullish momentum confirmed")
+    else:
+        score -= 1
+        bear.append("MACD below signal line — bearish momentum")
+
+    # ── SMA trend ─────────────────────────────────────────────────────────────
+    if sma_s > sma_l and price > sma_s:
+        score += 1
+        bull.append(
+            f"Price above both moving averages, SMA{SMA_SHORT} above SMA{SMA_LONG} — uptrend intact"
+        )
+    elif sma_s < sma_l and price < sma_s:
+        score -= 1
+        bear.append(
+            f"Price below both moving averages, SMA{SMA_SHORT} below SMA{SMA_LONG} — downtrend"
+        )
+
+    # ── Bollinger Bands ───────────────────────────────────────────────────────
+    if price < bb_lower:
+        score += 1
+        bull.append("Price below lower Bollinger Band — statistically oversold")
+    elif price > bb_upper:
+        score -= 1
+        bear.append("Price above upper Bollinger Band — statistically overbought")
+
+    # ── Fundamentals ──────────────────────────────────────────────────────────
+    analyst_target = None
+    if fundamentals:
+        rec = fundamentals.get("Recommendation", "N/A")
+        if rec in ("BUY", "STRONG_BUY"):
+            score += 2
+            bull.append(f"Analyst consensus: {rec.replace('_', ' ')}")
+        elif rec in ("SELL", "STRONG_SELL", "UNDERPERFORM"):
+            score -= 1
+            bear.append(f"Analyst consensus: {rec.replace('_', ' ')}")
+
+        pe = _parse_num(fundamentals.get("P/E Ratio (TTM)"))
+        if pe is not None:
+            if pe < 0:
+                score -= 1
+                bear.append(
+                    f"Negative P/E ({pe:.1f}x) — company unprofitable on a trailing basis"
+                )
+            elif pe < 15:
+                score += 1
+                bull.append(
+                    f"P/E of {pe:.1f}x — attractively valued vs. market average"
+                )
+            elif pe > 50:
+                score -= 1
+                bear.append(f"P/E of {pe:.1f}x — stretched valuation")
+
+        high_52 = _parse_num(fundamentals.get("52-Week High"))
+        low_52 = _parse_num(fundamentals.get("52-Week Low"))
+        if high_52 and low_52 and high_52 > low_52:
+            pct_range = (price - low_52) / (high_52 - low_52) * 100
+            if pct_range < 20:
+                score += 1
+                bull.append(f"Near 52-week low (${low_52:.2f}) — potential value entry")
+            elif pct_range > 85:
+                score -= 1
+                bear.append(
+                    f"Near 52-week high (${high_52:.2f}) — limited near-term upside"
+                )
+
+        analyst_target = _parse_num(fundamentals.get("Analyst Target"))
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    if score >= 4:
+        verdict = "🟢 BUY"
+    elif score >= 2:
+        verdict = "🟡 LEAN BUY"
+    elif score <= -3:
+        verdict = "🔴 SELL"
+    elif score <= -1:
+        verdict = "🟠 LEAN SELL"
+    else:
+        verdict = "⚪ HOLD"
+
+    # ── Investment Thesis ─────────────────────────────────────────────────────
+    primary = bull if score >= 0 else bear
+    secondary = bear if score >= 0 else bull
+    points = (primary[:2] + secondary[:1]) if primary else secondary[:2]
+    if not points:
+        points = ["Mixed signals across indicators — no clear directional edge."]
+    thesis = "  \n".join(f"- {p}." for p in points)
+    if analyst_target:
+        upside = (analyst_target - price) / price * 100
+        thesis += f"\n- Analyst consensus target ${analyst_target:.2f} implies {upside:+.1f}% from current price."
+
+    # ── Entry Price ───────────────────────────────────────────────────────────
+    if score >= 2:
+        support = max(sma_s, bb_lower)
+        gap = (price - support) / price
+        if gap < 0.03:
+            entry = f"**${price:.2f} (current)** — already at support; reasonable to enter now."
+        else:
+            entry = (
+                f"**${support:.2f}–${price:.2f}** — enter at current levels or add on a "
+                f"pullback to SMA{SMA_SHORT} support (${sma_s:.2f})."
+            )
+    elif score <= -2:
+        entry = (
+            f"**Avoid at ${price:.2f}.** Wait for RSI < 40 or a retest of "
+            f"SMA{SMA_LONG} (${sma_l:.2f}) before considering entry."
+        )
+    else:
+        entry = (
+            f"**${sma_s:.2f}–${sma_l:.2f}** — wait for a pullback to moving average "
+            "support before committing capital."
+        )
+
+    # ── MOAT ─────────────────────────────────────────────────────────────────
+    moat = "Insufficient data to assess competitive position."
+    if fundamentals:
+        gm = _parse_num(fundamentals.get("Gross Margin"))
+        roe = _parse_num(fundamentals.get("ROE"))
+        if gm is not None:
+            if gm > 60:
+                moat_label, moat_desc = (
+                    "Wide MOAT",
+                    f"{gm:.1f}% gross margin signals strong pricing power and durable brand advantage",
+                )
+            elif gm > 35:
+                moat_label, moat_desc = (
+                    "Moderate MOAT",
+                    f"{gm:.1f}% gross margin indicates some competitive advantage, but faces pricing pressure",
+                )
+            else:
+                moat_label, moat_desc = (
+                    "Narrow/No MOAT",
+                    f"thin {gm:.1f}% gross margin points to a commoditized or highly competitive business",
+                )
+            roe_note = ""
+            if roe is not None:
+                if roe > 20:
+                    roe_note = (
+                        f" ROE of {roe:.1f}% confirms efficient capital deployment."
+                    )
+                elif roe > 10:
+                    roe_note = f" ROE of {roe:.1f}% is adequate but not exceptional."
+                else:
+                    roe_note = f" ROE of {roe:.1f}% is weak — capital is not being deployed effectively."
+            moat = f"**{moat_label}** — {moat_desc}.{roe_note}"
+
+    # ── Key Risks ─────────────────────────────────────────────────────────────
+    risks: list[str] = []
+
+    for b in bear[:2]:
+        risks.append(b)
+
+    if fundamentals:
+        de = _parse_num(fundamentals.get("Debt/Equity"))
+        if de is not None and de > 150:
+            risks.append(
+                f"High debt/equity ({de:.0f}%) — elevated balance sheet risk if rates stay high"
+            )
+        nm = _parse_num(fundamentals.get("Net Margin"))
+        if nm is not None and nm < 5:
+            risks.append(
+                f"Thin net margin ({nm:.1f}%) — vulnerable to cost inflation or revenue shortfalls"
+            )
+
+    if rsi > 55 and "RSI" not in " ".join(risks):
+        risks.append(
+            "Momentum-driven rally may unwind sharply on any negative catalyst"
+        )
+    if score >= 3:
+        risks.append(
+            "High expectations priced in — any earnings miss could trigger a sharp selloff"
+        )
+    if not risks:
+        risks.append(
+            "Macro/market risk — broad drawdowns affect all equities regardless of fundamentals"
+        )
+        risks.append(
+            "Execution risk — company may miss analyst estimates or guide lower"
+        )
+
+    risk_block = "\n".join(f"- {r}" for r in risks[:3])
+
+    # ── Assemble ──────────────────────────────────────────────────────────────
+    return f"""## Verdict: {verdict}
+
+### Why Invest (or Not)
+{thesis}
+
+### Entry Price
+{entry}
+
+### MOAT
+{moat}
+
+### Key Risks
+{risk_block}"""
 
 
 st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
@@ -136,35 +330,11 @@ for symbol in tickers:
     m3.metric(f"SMA {SMA_SHORT}", f"${last[f'SMA_{SMA_SHORT}']:.2f}")
     m4.metric(f"SMA {SMA_LONG}", f"${last[f'SMA_{SMA_LONG}']:.2f}")
 
-    # ── AI Investment Commentary ──────────────────────────────────────────────
-    rsi_val = last["RSI"]
-    tech_str = (
-        f"RSI (14): {rsi_val:.1f} — {rsi_signal(rsi_val)}\n"
-        f"MACD: {last['MACD']:.3f} — {macd_signal(last['MACD'], last['MACD_Signal'])}\n"
-        f"SMA {SMA_SHORT}/{SMA_LONG}: {last[f'SMA_{SMA_SHORT}']:.2f} / {last[f'SMA_{SMA_LONG}']:.2f} — "
-        f"{sma_signal(price, last[f'SMA_{SMA_SHORT}'], last[f'SMA_{SMA_LONG}'])}\n"
-        f"Bollinger Bands: {last['BB_Lower']:.2f} – {last['BB_Upper']:.2f} (mid {last['BB_Mid']:.2f})"
-    )
-    fund_str = (
-        "\n".join(f"{k}: {v}" for k, v in fundamentals.items())
-        if fundamentals
-        else "Fundamentals unavailable."
-    )
-
+    # ── Investment Commentary ─────────────────────────────────────────────────
     with st.container(border=True):
-        st.markdown("#### 🤖 AI Investment Analysis")
-        try:
-            with st.spinner("Generating analysis…"):
-                commentary = generate_commentary(symbol, price, pct, tech_str, fund_str)
-            st.markdown(commentary)
-        except anthropic.AuthenticationError:
-            st.warning(
-                "Add your `ANTHROPIC_API_KEY` to Streamlit secrets to enable AI commentary."
-            )
-        except anthropic.RateLimitError:
-            st.warning("Claude API rate limit hit — try again in a moment.")
-        except Exception as e:
-            st.warning(f"AI commentary unavailable: {e}")
+        st.markdown("#### 📋 Investment Analysis")
+        commentary = build_commentary(symbol, price, pct, last, fundamentals)
+        st.markdown(commentary)
 
     # ── Chart ─────────────────────────────────────────────────────────────────
     fig = make_plotly_figure(symbol, df)
@@ -174,6 +344,7 @@ for symbol in tickers:
 
     with col_tech:
         st.write("**Technical Signals**")
+        rsi_val = last["RSI"]
         st.dataframe(
             pd.DataFrame(
                 {
